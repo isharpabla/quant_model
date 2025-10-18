@@ -54,7 +54,11 @@ def load_prices(cfg: Config) -> pd.DataFrame:
     elif cfg.ONLINE and yf is not None:
         data = yf.download(cfg.tickers, start=cfg.start, end=cfg.end, auto_adjust=True, progress=False)
         if isinstance(data.columns, pd.MultiIndex):
-            prices = data["Adj Close"].copy()
+            # yfinance often returns a MultiIndex; grab Adj Close level
+            if ("Adj Close" in data.columns.get_level_values(1)):
+                prices = data.xs("Adj Close", axis=1, level=1)
+            else:
+                prices = data.copy()
         else:
             prices = data.copy()
         prices = prices.dropna(how="all")
@@ -68,6 +72,7 @@ def load_prices(cfg: Config) -> pd.DataFrame:
 def momentum_score(prices_m: pd.DataFrame, lookbacks: List[int]) -> pd.DataFrame:
     score = pd.DataFrame(0.0, index=prices_m.index, columns=prices_m.columns)
     for L in lookbacks:
+        # Price_{t-1} / Price_{t-(L+1)} - 1 (exclude last month)
         ret_ex_last1 = prices_m.shift(1) / prices_m.shift(L + 1) - 1.0
         score = score.add(ret_ex_last1, fill_value=0.0)
     score /= float(len(lookbacks))
@@ -78,7 +83,13 @@ def last_1m_return(prices_m: pd.DataFrame) -> pd.DataFrame:
     return prices_m.pct_change(1)
 
 
-def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_ret: float, cash_col: Optional[str] = None) -> pd.DataFrame:
+def build_weights(
+    scores: pd.DataFrame,
+    r1m: pd.DataFrame,
+    top_n: int,
+    min_1m_ret: float,
+    cash_col: Optional[str] = None
+) -> pd.DataFrame:
     ranks = scores.rank(axis=1, ascending=False, method="first")
     selected = (ranks <= top_n) & (r1m >= min_1m_ret)
     weights = selected.astype(float)
@@ -121,7 +132,7 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
     turnover = (weights - w_prev).abs().sum(axis=1)
     tc = turnover * (cfg.transaction_cost_bps / 10000.0)
 
-    # Align TC to daily index (no KeyError)
+    # Align TC to daily index (avoids KeyError on missing labels)
     tc_daily = tc.reindex(port_rets_daily.index).fillna(0.0)
     port_rets_daily = port_rets_daily - tc_daily
 
@@ -140,6 +151,7 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
         "equity": equity,
         "trades": trades,
     }
+
 
 # ---------- Metrics ----------
 def max_drawdown(series: pd.Series) -> float:
