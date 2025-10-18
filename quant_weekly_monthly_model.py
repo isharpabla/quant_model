@@ -73,8 +73,10 @@ def momentum_score(prices_m: pd.DataFrame, lookbacks: List[int]) -> pd.DataFrame
     score /= float(len(lookbacks))
     return score
 
+
 def last_1m_return(prices_m: pd.DataFrame) -> pd.DataFrame:
     return prices_m.pct_change(1)
+
 
 def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_ret: float, cash_col: Optional[str] = None) -> pd.DataFrame:
     ranks = scores.rank(axis=1, ascending=False, method="first")
@@ -99,21 +101,23 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
     r1m = last_1m_return(prices_f)
     weights = build_weights(scores, r1m, cfg.top_n, cfg.min_1m_ret, cfg.cash_ticker).shift(1).fillna(0.0)
 
-    # --- FIXED: safe reindex (no KeyError) ---
+    # Extend weights to daily
     weights_daily = weights.reindex(prices.index, method='ffill').fillna(0.0)
 
+    # Daily portfolio returns
     rets_daily = prices.pct_change().fillna(0.0)
     port_rets_daily = (weights_daily * rets_daily).sum(axis=1)
 
-    # transaction costs aligned safely
+    # Transaction costs
     w_prev = weights.shift(1).fillna(0.0)
     turnover = (weights - w_prev).abs().sum(axis=1)
     tc = turnover * (cfg.transaction_cost_bps / 10000.0)
 
-    # --- FIXED: align tc without .loc[] ---
+    # ✅ Fixed: Safe reindex to align tc with daily returns (no KeyError)
     tc_daily = tc.reindex(port_rets_daily.index).fillna(0.0)
     port_rets_daily = port_rets_daily - tc_daily
 
+    # Compute equity
     equity = (1.0 + port_rets_daily).cumprod()
     trades = (weights - w_prev).fillna(0.0)
 
@@ -136,18 +140,22 @@ def max_drawdown(series: pd.Series) -> float:
     dd = series / peak - 1.0
     return float(dd.min())
 
+
 def annualize_return(daily_rets: pd.Series) -> float:
     mean = daily_rets.mean()
     return float((1 + mean) ** 252 - 1)
 
+
 def annualize_vol(daily_rets: pd.Series) -> float:
     return float(daily_rets.std() * np.sqrt(252))
+
 
 def sharpe(daily_rets: pd.Series, rf: float = 0.0) -> float:
     rf_daily = (1 + rf) ** (1 / 252) - 1
     excess = daily_rets - rf_daily
     vol = annualize_vol(excess)
     return float(np.nan) if vol == 0 else float(annualize_return(excess) / vol)
+
 
 def summarize(bt: Dict[str, pd.DataFrame], rf: float = 0.0) -> pd.Series:
     eq = bt["equity"].copy()
