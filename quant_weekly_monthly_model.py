@@ -23,14 +23,14 @@ class Config:
     tickers: List[str]
     start: str = "2012-01-01"
     end: Optional[str] = None
-    freq: str = "BM"  # 'BM' = business month-end
+    freq: str = "BM"                 # 'BM' = business month-end
     lookback_months: List[int] = None
     top_n: int = 3
     min_1m_ret: float = 0.0
     cash_ticker: Optional[str] = None
     transaction_cost_bps: float = 5.0
     data_dir: Optional[str] = None
-    ONLINE: bool = True
+    ONLINE: bool = True               # online mode
 
     def __post_init__(self):
         if self.lookback_months is None:
@@ -71,6 +71,7 @@ def load_prices(cfg: Config) -> pd.DataFrame:
 def momentum_score(prices_m: pd.DataFrame, lookbacks: List[int]) -> pd.DataFrame:
     score = pd.DataFrame(0.0, index=prices_m.index, columns=prices_m.columns)
     for L in lookbacks:
+        # exclude the most recent 1 month: P_{t-1} / P_{t-(L+1)} - 1
         ret_ex_last1 = prices_m.shift(1) / prices_m.shift(L + 1) - 1.0
         score = score.add(ret_ex_last1, fill_value=0.0)
     score /= float(len(lookbacks))
@@ -81,17 +82,27 @@ def last_1m_return(prices_m: pd.DataFrame) -> pd.DataFrame:
     return prices_m.pct_change(1)
 
 
-def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_ret: float, cash_col: Optional[str] = None) -> pd.DataFrame:
+def build_weights(
+    scores: pd.DataFrame,
+    r1m: pd.DataFrame,
+    top_n: int,
+    min_1m_ret: float,
+    cash_col: Optional[str] = None
+) -> pd.DataFrame:
     ranks = scores.rank(axis=1, ascending=False, method="first")
     selected = (ranks <= top_n) & (r1m >= min_1m_ret)
+
     weights = selected.astype(float)
     row_sums = weights.sum(axis=1).replace(0, np.nan)
     weights = weights.div(row_sums, axis=0).fillna(0.0)
+
     if cash_col is not None and cash_col not in weights.columns:
         weights[cash_col] = 0.0
+
     if cash_col is not None:
         leftover = 1.0 - weights.sum(axis=1)
         weights[cash_col] = weights[cash_col].add(leftover, fill_value=0.0)
+
     return weights
 
 
@@ -112,12 +123,16 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
         .fillna(0.0)
     )
 
-    # Extend weights to daily calendar via forward-fill
+    # Extend weights to DAILY calendar via forward-fill
     weights_daily = weights.reindex(prices.index, method="ffill").fillna(0.0)
 
-    # Daily portfolio returns
-    rets_daily = prices.pct_change().fillna(0.0)
+    # Daily portfolio returns (scale-safe)
+    rets_daily = prices.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     port_rets_daily = (weights_daily * rets_daily).sum(axis=1)
+
+    # Safety rails: avoid unrealistic compounding due to bad ticks
+    port_rets_daily = port_rets_daily.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    port_rets_daily = port_rets_daily.clip(lower=-0.30, upper=0.30)  # cap daily moves at ±30%
 
     # Transaction costs on rebalance dates
     w_prev = weights.shift(1).fillna(0.0)
@@ -190,14 +205,14 @@ def main():
         tickers=["SPY", "QQQ", "IWM", "EFA", "EEM", "TLT", "LQD"],
         start="2012-01-01",
         end=None,
-        freq="BM",  # Business month-end
+        freq="BM",                # Business month-end
         lookback_months=[6, 12],
         top_n=3,
         min_1m_ret=0.0,
         cash_ticker=None,
         transaction_cost_bps=5.0,
         data_dir=None,
-        ONLINE=True,
+        ONLINE=True
     )
 
     prices = load_prices(cfg)
