@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # Quant momentum + filter backtester for stocks/ETFs
-# Uses yfinance online data by default.
+# Uses yfinance online data by default (Business Month-End safe version)
 
 import os
 import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Dict
-
 import numpy as np
 import pandas as pd
 
@@ -24,7 +23,7 @@ class Config:
     tickers: List[str]
     start: str = "2012-01-01"
     end: Optional[str] = None
-    freq: str = "M"                   # 'M' monthly or 'W-FRI' weekly
+    freq: str = "BM"                 # 'BM' = business month-end
     lookback_months: List[int] = None
     top_n: int = 3
     min_1m_ret: float = 0.0
@@ -90,29 +89,24 @@ def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_re
 
 # ---------- Backtest ----------
 def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
-    # Signal frequency series
     prices_f = prices.resample(cfg.freq).last().dropna(how="all")
     prices_f = prices_f.dropna(axis=1, how="any")
 
-    # Signals
     scores = momentum_score(prices_f, cfg.lookback_months)
     r1m = last_1m_return(prices_f)
     weights = build_weights(scores, r1m, cfg.top_n, cfg.min_1m_ret, cfg.cash_ticker).shift(1).fillna(0.0)
 
-    # Daily portfolio returns
     weights_daily = weights.reindex(prices.index).ffill().fillna(0.0)
     rets_daily = prices.pct_change().fillna(0.0)
     port_rets_daily = (weights_daily * rets_daily).sum(axis=1)
 
-    # Transaction costs applied only on dates present in both indices
+    # transaction costs safely aligned
     w_prev = weights.shift(1).fillna(0.0)
     turnover = (weights - w_prev).abs().sum(axis=1)
     tc = turnover * (cfg.transaction_cost_bps / 10000.0)
 
-    # Align indices safely
     tc_daily = pd.Series(0.0, index=port_rets_daily.index)
-    apply_idx = tc_daily.index.intersection(tc.index)
-    tc_daily.loc[apply_idx] = tc.loc[apply_idx]
+    tc_daily.update(tc)
     port_rets_daily = port_rets_daily - tc_daily
 
     equity = (1.0 + port_rets_daily).cumprod()
@@ -172,7 +166,7 @@ def main():
         tickers=["SPY", "QQQ", "IWM", "EFA", "EEM", "TLT", "LQD"],
         start="2012-01-01",
         end=None,
-        freq="M",                 # change to 'W-FRI' for weekly
+        freq="BM",                # Business month-end
         lookback_months=[6, 12],
         top_n=3,
         min_1m_ret=0.0,
