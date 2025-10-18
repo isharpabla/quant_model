@@ -25,13 +25,13 @@ class Config:
     start: str = "2012-01-01"
     end: Optional[str] = None
     freq: str = "M"                   # 'M' monthly or 'W-FRI' weekly
-    lookback_months: List[int] = None # momentum windows (excl last 1M)
+    lookback_months: List[int] = None
     top_n: int = 3
     min_1m_ret: float = 0.0
     cash_ticker: Optional[str] = None
     transaction_cost_bps: float = 5.0
-    data_dir: Optional[str] = None    # folder with CSVs if using offline
-    ONLINE: bool = True               # <- online mode enabled
+    data_dir: Optional[str] = None
+    ONLINE: bool = True               # online mode
 
     def __post_init__(self):
         if self.lookback_months is None:
@@ -40,7 +40,6 @@ class Config:
 
 # ---------- Data ----------
 def load_prices(cfg: Config) -> pd.DataFrame:
-    """Return daily Adj Close prices. CSV mode or yfinance."""
     if cfg.data_dir:
         frames = []
         for t in cfg.tickers:
@@ -65,7 +64,6 @@ def load_prices(cfg: Config) -> pd.DataFrame:
 
 # ---------- Signals ----------
 def momentum_score(prices_m: pd.DataFrame, lookbacks: List[int]) -> pd.DataFrame:
-    """Average of L-month returns excluding last 1M to reduce reversal."""
     score = pd.DataFrame(0.0, index=prices_m.index, columns=prices_m.columns)
     for L in lookbacks:
         ret_ex_last1 = prices_m.shift(1) / prices_m.shift(L + 1) - 1.0
@@ -77,7 +75,6 @@ def last_1m_return(prices_m: pd.DataFrame) -> pd.DataFrame:
     return prices_m.pct_change(1)
 
 def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_ret: float, cash_col: Optional[str] = None) -> pd.DataFrame:
-    """Rank by score. Keep top_n with r1m >= threshold. Equal weight. Leftover to cash."""
     ranks = scores.rank(axis=1, ascending=False, method="first")
     selected = (ranks <= top_n) & (r1m >= min_1m_ret)
     weights = selected.astype(float)
@@ -95,7 +92,7 @@ def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_re
 # ---------- Backtest ----------
 def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
     prices_f = prices.resample(cfg.freq).last().dropna(how="all")
-    prices_f = prices_f.dropna(axis=1, how="any")  # drop incomplete histories
+    prices_f = prices_f.dropna(axis=1, how="any")
 
     scores = momentum_score(prices_f, cfg.lookback_months)
     r1m = last_1m_return(prices_f)
@@ -106,10 +103,12 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
     rets_daily = prices.pct_change().fillna(0.0)
     port_rets_daily = (weights_daily * rets_daily).sum(axis=1)
 
+    # Transaction costs on actual rebalance dates that exist in daily index
     w_prev = weights.shift(1).fillna(0.0)
     turnover = (weights - w_prev).abs().sum(axis=1)
     tc = turnover * (cfg.transaction_cost_bps / 10000.0)
-    port_rets_daily.loc[weights.index] = port_rets_daily.loc[weights.index] - tc
+    apply_idx = port_rets_daily.index.intersection(tc.index)  # <-- fix
+    port_rets_daily.loc[apply_idx] = port_rets_daily.loc[apply_idx] - tc.loc[apply_idx]
 
     equity = (1.0 + port_rets_daily).cumprod()
     trades = (weights - w_prev).fillna(0.0)
@@ -174,12 +173,9 @@ def main():
         min_1m_ret=0.0,
         cash_ticker=None,
         transaction_cost_bps=5.0,
-        data_dir=None,            # keep None for online mode
-        ONLINE=True               # online data via yfinance
+        data_dir=None,
+        ONLINE=True
     )
-
-    # Debug line so you can see the active mode:
-    print("ONLINE=", cfg.ONLINE, "data_dir=", cfg.data_dir, "yf_installed=", yf is not None)
 
     prices = load_prices(cfg)
     bt = backtest(prices, cfg)
