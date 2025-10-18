@@ -38,6 +38,16 @@ class Config:
 
 
 # ---------- Data ----------
+def _normalize_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure DatetimeIndex at midnight (no tz), sorted, unique."""
+    idx = pd.to_datetime(df.index).tz_localize(None)
+    idx = idx.normalize()
+    df = df.copy()
+    df.index = idx
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.sort_index()
+    return df
+
 def load_prices(cfg: Config) -> pd.DataFrame:
     """
     Load adjusted close prices as a DataFrame (index: trading days, columns: tickers).
@@ -53,7 +63,7 @@ def load_prices(cfg: Config) -> pd.DataFrame:
                 raise ValueError(f"{t} CSV missing 'Adj Close' column")
             df = df[["Date", "Adj Close"]].rename(columns={"Adj Close": t}).set_index("Date")
             frames.append(df)
-        prices = pd.concat(frames, axis=1).sort_index()
+        prices = pd.concat(frames, axis=1)
     elif cfg.ONLINE and yf is not None:
         data = yf.download(
             cfg.tickers,
@@ -61,27 +71,29 @@ def load_prices(cfg: Config) -> pd.DataFrame:
             end=cfg.end,
             auto_adjust=True,
             progress=False,
-            group_by="ticker"  # yfinance sometimes nests columns; we'll handle below
+            group_by="ticker"
         )
-        # If multiindex columns, extract adjusted close
+        # If multiindex columns, extract adjusted/close level
         if isinstance(data.columns, pd.MultiIndex):
-            if ("Adj Close" in data.columns.get_level_values(1)) or ("Close" in data.columns.get_level_values(1)):
-                # Prefer Adj Close if present; fall back to Close for safety
-                level1 = "Adj Close" if "Adj Close" in data.columns.get_level_values(1) else "Close"
+            level1 = None
+            if "Adj Close" in data.columns.get_level_values(1):
+                level1 = "Adj Close"
+            elif "Close" in data.columns.get_level_values(1):
+                level1 = "Close"
+            if level1 is not None:
                 prices = data.xs(level1, axis=1, level=1)
             else:
                 prices = data.copy()
         else:
-            # Flat columns (already adjusted)
             prices = data.copy()
-        prices = prices.dropna(how="all")
     else:
         raise RuntimeError(
             "No data source. Either set ONLINE=True with yfinance installed or provide data_dir with CSVs."
         )
 
-    prices = prices.loc[cfg.start:cfg.end].sort_index()
-    prices = prices.ffill().dropna(how="all")
+    prices = prices.dropna(how="all")
+    prices = prices.loc[cfg.start:cfg.end]
+    prices = _normalize_index(prices).ffill().dropna(how="all")
     return prices
 
 
@@ -136,8 +148,11 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
     """
     Rebalance on cfg.freq using end-of-period prices. Extend weights to daily via ffill.
     """
-    # Rebalance prices (end-of-period value for chosen frequency)
+    prices = _normalize_index(prices)
+
+    # Rebalance grid (end-of-period value for chosen frequency)
     prices_f = prices.resample(cfg.freq).last().dropna(how="all")
+    prices_f = _normalize_index(prices_f)
 
     # Drop tickers with missing values at rebalance points
     prices_f = prices_f.dropna(axis=1, how="any")
@@ -146,31 +161,31 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
     scores = momentum_score(prices_f, cfg.lookback_months)
     r1m = last_1m_return(prices_f)
 
-    # Weights live on the rebalance grid, then shift by 1 period to trade next period open/day
+    # Weights live on the rebalance grid, then shift by 1 period to trade next period
     weights = build_weights(scores, r1m, cfg.top_n, cfg.min_1m_ret, cfg.cash_ticker)\
         .shift(1)\
         .fillna(0.0)
+    weights = _normalize_index(weights)
 
-    # --- KEY FIX ---
-    # Align monthly/weekly weights to the DAILY price index by forward-filling.
-    # This avoids KeyErrors due to calendar vs business-month-end mismatch.
+    # Extend rebalance weights to daily calendar via forward-fill (no .loc on lists)
     weights_daily = weights.reindex(prices.index, method="ffill").fillna(0.0)
 
     # Daily returns and portfolio returns
     rets_daily = prices.pct_change().fillna(0.0)
     port_rets_daily = (weights_daily * rets_daily).sum(axis=1)
 
-    # Transaction costs computed on rebalance dates, safely aligned to daily index
+    # Transaction costs computed on rebalance dates
     w_prev = weights.shift(1).fillna(0.0)
-    turnover = (weights - w_prev).abs().sum(axis=1)  # lives on rebalance index
-
+    turnover = (weights - w_prev).abs().sum(axis=1)  # index = rebalance dates
     tc = turnover * (cfg.transaction_cost_bps / 10000.0)
 
-    # Put TC onto the daily grid; charge on the rebalance date
+    # Put TC onto the daily grid exactly on rebalance dates using an intersection (no KeyError)
     tc_daily = pd.Series(0.0, index=port_rets_daily.index)
-    tc_daily.update(tc.reindex(tc_daily.index, method=None))  # exact dates only; NaNs ignored
+    rb = tc.index.intersection(tc_daily.index)
+    if len(rb) > 0:
+        tc_daily.loc[rb] = tc.loc[rb].values
 
-    port_rets_daily = port_rets_daily - tc_daily.fillna(0.0)
+    port_rets_daily = port_rets_daily - tc_daily
 
     equity = (1.0 + port_rets_daily).cumprod()
     trades = (weights - w_prev).fillna(0.0)
