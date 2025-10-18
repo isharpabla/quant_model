@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Quant momentum + filter backtester for stocks/ETFs
-# Runs with online data by default (yfinance). Weekly or monthly signals.
+# Uses yfinance online data by default.
 
 import os
 import warnings
@@ -80,7 +80,6 @@ def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_re
     weights = selected.astype(float)
     row_sums = weights.sum(axis=1).replace(0, np.nan)
     weights = weights.div(row_sums, axis=0).fillna(0.0)
-
     if cash_col is not None and cash_col not in weights.columns:
         weights[cash_col] = 0.0
     if cash_col is not None:
@@ -91,24 +90,30 @@ def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_re
 
 # ---------- Backtest ----------
 def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
+    # Signal frequency series
     prices_f = prices.resample(cfg.freq).last().dropna(how="all")
     prices_f = prices_f.dropna(axis=1, how="any")
 
+    # Signals
     scores = momentum_score(prices_f, cfg.lookback_months)
     r1m = last_1m_return(prices_f)
-
     weights = build_weights(scores, r1m, cfg.top_n, cfg.min_1m_ret, cfg.cash_ticker).shift(1).fillna(0.0)
 
+    # Daily portfolio returns
     weights_daily = weights.reindex(prices.index).ffill().fillna(0.0)
     rets_daily = prices.pct_change().fillna(0.0)
     port_rets_daily = (weights_daily * rets_daily).sum(axis=1)
 
-    # Transaction costs on actual rebalance dates that exist in daily index
+    # Transaction costs applied only on dates present in both indices
     w_prev = weights.shift(1).fillna(0.0)
     turnover = (weights - w_prev).abs().sum(axis=1)
     tc = turnover * (cfg.transaction_cost_bps / 10000.0)
-    apply_idx = port_rets_daily.index.intersection(tc.index)  # <-- fix
-    port_rets_daily.loc[apply_idx] = port_rets_daily.loc[apply_idx] - tc.loc[apply_idx]
+
+    # Align indices safely
+    tc_daily = pd.Series(0.0, index=port_rets_daily.index)
+    apply_idx = tc_daily.index.intersection(tc.index)
+    tc_daily.loc[apply_idx] = tc.loc[apply_idx]
+    port_rets_daily = port_rets_daily - tc_daily
 
     equity = (1.0 + port_rets_daily).cumprod()
     trades = (weights - w_prev).fillna(0.0)
