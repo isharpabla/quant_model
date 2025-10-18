@@ -94,30 +94,38 @@ def build_weights(scores: pd.DataFrame, r1m: pd.DataFrame, top_n: int, min_1m_re
 
 # ---------- Backtest ----------
 def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
+    # Rebalance prices (end-of-period for chosen frequency)
     prices_f = prices.resample(cfg.freq).last().dropna(how="all")
     prices_f = prices_f.dropna(axis=1, how="any")
 
+    # Signals on the rebalance grid
     scores = momentum_score(prices_f, cfg.lookback_months)
     r1m = last_1m_return(prices_f)
-    weights = build_weights(scores, r1m, cfg.top_n, cfg.min_1m_ret, cfg.cash_ticker).shift(1).fillna(0.0)
 
-    # Extend weights to daily
-    weights_daily = weights.reindex(prices.index, method='ffill').fillna(0.0)
+    # Weights live on the rebalance grid; shift to trade next period
+    weights = (
+        build_weights(scores, r1m, cfg.top_n, cfg.min_1m_ret, cfg.cash_ticker)
+        .shift(1)
+        .fillna(0.0)
+    )
+
+    # Extend weights to DAILY calendar via forward-fill
+    weights_daily = weights.reindex(prices.index, method="ffill").fillna(0.0)
 
     # Daily portfolio returns
     rets_daily = prices.pct_change().fillna(0.0)
     port_rets_daily = (weights_daily * rets_daily).sum(axis=1)
 
-    # Transaction costs
+    # Transaction costs on rebalance dates
     w_prev = weights.shift(1).fillna(0.0)
     turnover = (weights - w_prev).abs().sum(axis=1)
     tc = turnover * (cfg.transaction_cost_bps / 10000.0)
 
-    # ✅ Fixed: Safe reindex to align tc with daily returns (no KeyError)
+    # Align TC to daily index (no KeyError)
     tc_daily = tc.reindex(port_rets_daily.index).fillna(0.0)
     port_rets_daily = port_rets_daily - tc_daily
 
-    # Compute equity
+    # Equity curve & trades
     equity = (1.0 + port_rets_daily).cumprod()
     trades = (weights - w_prev).fillna(0.0)
 
@@ -132,7 +140,6 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
         "equity": equity,
         "trades": trades,
     }
-
 
 # ---------- Metrics ----------
 def max_drawdown(series: pd.Series) -> float:
