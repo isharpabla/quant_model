@@ -174,9 +174,32 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
     # Resample to rebalance frequency
     prices = prices.sort_index()
     prices_f = prices.resample(cfg.freq).last().dropna(how="all")
-
     scores = momentum_score(prices_f, cfg.lookback_months)
     r1m = last_1m_return(prices_f)
+
+    # --- Professional Momentum Refinements ---
+
+    # 1️⃣ Compute recent volatility (last 60 daily returns)
+    vol = prices.pct_change().rolling(60).std().iloc[-1]
+    vol = vol.reindex(scores.columns).replace(0, np.nan)
+
+    # 2️⃣ Divide each stock's latest momentum by its volatility (risk-adjusted)
+    mom_latest = scores.iloc[-1]  # use latest available momentum score
+    mom_adj = mom_latest / vol
+
+    # 3️⃣ Standardize across all stocks (z-score normalization)
+    mom_z = (mom_adj - mom_adj.mean()) / mom_adj.std()
+
+    # 4️⃣ If you want to blend multiple horizons (1M,3M,6M,12M) dynamically:
+    #    (you can skip this if cfg.lookback_months already = [1,3])
+    # mom_z_1 = (momentum_score(prices_f, [1]).iloc[-1] / vol - mom_adj.mean()) / mom_adj.std()
+    # mom_z_3 = (momentum_score(prices_f, [3]).iloc[-1] / vol - mom_adj.mean()) / mom_adj.std()
+    # mom_z_6 = (momentum_score(prices_f, [6]).iloc[-1] / vol - mom_adj.mean()) / mom_adj.std()
+    # mom_z_12 = (momentum_score(prices_f, [12]).iloc[-1] / vol - mom_adj.mean()) / mom_adj.std()
+    # mom_z = 0.25*mom_z_1 + 0.25*mom_z_3 + 0.25*mom_z_6 + 0.25*mom_z_12
+
+    # 5️⃣ Replace the simple scores with the refined version for ranking
+    scores.loc[scores.index[-1]] = mom_z
 
     if cfg.cap_buckets and cfg.per_bucket_top_n:
         bucket_map = {t: b for b, lst in cfg.cap_buckets.items() for t in lst if t in scores.columns}
