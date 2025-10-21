@@ -177,29 +177,30 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
     scores = momentum_score(prices_f, cfg.lookback_months)
     r1m = last_1m_return(prices_f)
 
-    # --- Professional Momentum Refinements ---
+    # --- Professional Momentum Refinements (historical, every rebalance) ---
 
-    # 1️⃣ Compute recent volatility (last 60 daily returns)
-    vol = prices.pct_change().rolling(60).std().iloc[-1]
-    vol = vol.reindex(scores.columns).replace(0, np.nan)
+    # 1) Daily volatility (60 trading days) for each stock
+    daily_rets = prices.pct_change()
+    vol_daily = daily_rets.rolling(60, min_periods=20).std()
 
-    # 2️⃣ Divide each stock's latest momentum by its volatility (risk-adjusted)
-    mom_latest = scores.iloc[-1]  # use latest available momentum score
-    mom_adj = mom_latest / vol
+    # 2) Align volatility to rebalance dates (weekly/monthly index of prices_f)
+    vol_rb = vol_daily.reindex(prices_f.index, method="ffill")
 
-    # 3️⃣ Standardize across all stocks (z-score normalization)
-    mom_z = (mom_adj - mom_adj.mean()) / mom_adj.std()
+    # 3) Risk-normalize momentum: divide each row of 'scores' by same-date vol
+    #    (scores is on the rebalance index already)
+    mom_adj = scores.divide(vol_rb, axis=1)
 
-    # 4️⃣ If you want to blend multiple horizons (1M,3M,6M,12M) dynamically:
-    #    (you can skip this if cfg.lookback_months already = [1,3])
-    # mom_z_1 = (momentum_score(prices_f, [1]).iloc[-1] / vol - mom_adj.mean()) / mom_adj.std()
-    # mom_z_3 = (momentum_score(prices_f, [3]).iloc[-1] / vol - mom_adj.mean()) / mom_adj.std()
-    # mom_z_6 = (momentum_score(prices_f, [6]).iloc[-1] / vol - mom_adj.mean()) / mom_adj.std()
-    # mom_z_12 = (momentum_score(prices_f, [12]).iloc[-1] / vol - mom_adj.mean()) / mom_adj.std()
-    # mom_z = 0.25*mom_z_1 + 0.25*mom_z_3 + 0.25*mom_z_6 + 0.25*mom_z_12
-
-    # 5️⃣ Replace the simple scores with the refined version for ranking
-    scores.loc[scores.index[-1]] = mom_z
+    # 4) Row-wise z-score: standardize across all stocks *for each rebalance date*
+    def _rowwise_z(df: pd.DataFrame) -> pd.DataFrame:
+        m = df.mean(axis=1)
+        s = df.std(axis=1).replace(0, np.nan)
+        return df.sub(m, axis=0).div(s, axis=0).fillna(0.0)
+    
+    # 4️⃣ Create hybrid: blend raw and vol-adjusted momentum
+    #    70% risk-adjusted + 30% raw momentum
+    z_voladj = _rowwise_z(mom_adj)
+    z_raw = _rowwise_z(scores)          # standardize the unadjusted momentum
+    scores = 0.7 * z_voladj + 0.3 * z_raw
 
     if cfg.cap_buckets and cfg.per_bucket_top_n:
         bucket_map = {t: b for b, lst in cfg.cap_buckets.items() for t in lst if t in scores.columns}
@@ -249,7 +250,6 @@ def backtest(prices: pd.DataFrame, cfg: Config) -> Dict[str, pd.DataFrame]:
         "trades": trades,
     }
 
-
 # ---------- Metrics ----------
 def max_drawdown(s): return float((s / s.cummax() - 1).min())
 def annualize_return(r): return float((1 + r.mean())**252 - 1)
@@ -270,7 +270,6 @@ def summarize(bt):
         "Worst Day": float(r.min()),
         "Win Rate (daily)": float((r > 0).mean())
     })
-
 
 # ---------- NSE Symbols + MCAP (with cache) ----------
 def fetch_all_nse_symbols() -> List[str]:
