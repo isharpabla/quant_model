@@ -1,43 +1,42 @@
-Quant Model Backtester (Weekly/Monthly)
+What the model is doing
 
-What this does
+Build universe (NSE only)
+Pulls a broad NSE list, fetches market caps, and splits into 3 size buckets by quantiles: large / mid / small.
+Target mix: 5 large + 5 mid + 5 small (15 total).
+Get prices & set rebalance clock
+Downloads daily adjusted prices (yfinance).
+Resamples to your chosen rebalance frequency (you have W-FRI → weekly bars; if you switch to BM, they become monthly bars).
+Compute raw momentum (skip latest period)
+For each stock and each rebalance date, compute returns over the last 1 and 3 periods (period = week with W-FRI, month with BM), excluding the most recent period to avoid look-ahead.
+Average those two → raw momentum score.
+Professional refinements (applied historically, every date)
+Volatility adjust: compute 60-day daily volatility; divide raw momentum by same-date vol → risk-adjusted momentum.
+Cross-sectional z-scores per date: standardize both:
+z_voladj = z-score of risk-adjusted momentum
+z_raw = z-score of raw momentum
+Hybrid signal: final score = 0.7 * z_voladj + 0.3 * z_raw
+(balances stability with some punch from fast movers).
 
-Downloads or loads daily Adj Close for a universe of tickers.
-Resamples to rebalance frequency (BM = Business Month-End by default; try W-FRI for weekly).
-Computes momentum score as the average of [6, 12]-month returns excluding the most recent month.
-Applies a 1-month return filter (min_1m_ret, default 0.0).
-Buys top-N equal-weight assets; shifts weights by one rebalance to avoid look-ahead.
-Cash fallback (BIL by default): if nothing qualifies, leftover weight goes to cash.
-Transaction costs applied via turnover (bps).
-Scale-safe compounding (caps extreme daily moves and sanitizes NaNs/infs).
-Outputs equity curve, daily returns, weights, trades, summary metrics, and equity vs SPY plot.
+Rank & select inside each cap bucket
+Rank by the final score within each bucket.
+Apply a simple gate r1m >= min_1m_ret (yours is 0.0, so no extra filter).
+Pick up to 5 per bucket. If a bucket can’t fill (data gaps, etc.), the leftover stays in cash (ticker BIL).
 
-Requirements
+Weights, costs, performance
+Equal-weight within each bucket, then equal-weight across buckets.
+Apply 10 bps transaction cost on rebalance days.
+Build equity curve; compare vs NIFTYBEES; save CSVs and a benchmark plot.
 
-Python 3.10+
-Install deps:
-pip install pandas numpy yfinance matplotlib
+How the shortlist is produced
 
-How to run
+After the backtest computes the new week’s weights, we take the latest rebalance row of weights.
+Drop cash (BIL).
+Any ticker with weight > 0 is included.
+Save to backtest_output/shortlist_latest_15.csv with two columns: Ticker and its Bucket (large/mid/small).
+That printed list in the console under [SHORTLIST @ last rebalance] is the same set.
 
-Open quant_weekly_monthly_model.py.
-Edit the Config in main():
-tickers=[...] (see Indian stocks note below)
-freq="BM" (monthly) or freq="W-FRI" (weekly)
-min_1m_ret=0.0 (try 0.02 to require positive 1-month momentum)
-cash_ticker="BIL" (set to None to disable cash)
-Choose one data source:
-ONLINE=True for yfinance or
-data_dir="/path/to/csvs" for local CSVs (files must be TICKER.csv with columns Date, Adj Close)
+Quick notes you might care about
 
-Run:
-python quant_weekly_monthly_model.py
-
-Outputs (saved next to the script):
-backtest_output/
-  equity_curve.csv
-  daily_returns.csv
-  weights_by_period.csv
-  trades_by_period.csv
-  summary_metrics.csv
-  equity_vs_benchmark.png
+With W-FRI, your “1 and 3” lookbacks are 1-week & 3-weeks. Switch to BM if you truly want 1- & 3-month momentum.
+The hybrid (70% vol-adjusted + 30% raw, both z-scored) is why the list is more stable and avoids “lottery” small caps, but can still catch strong new movers.
+If a bucket has too few valid names, you’ll see <15 tickers; the remainder is kept as cash by design (risk-aware).
